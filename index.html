@@ -42,6 +42,14 @@
   .field label span{font-weight:500;color:var(--sub)}
   .hint{margin:0;font-size:12px;color:var(--sub)}
   input[type=text],input[type=url],input[type=date]{width:100%;height:44px;padding:0 14px;border:1px solid var(--field);border-radius:9px;color:var(--ink);background:#fff}
+  textarea{width:100%;padding:10px 14px;border:1px solid var(--field);border-radius:9px;color:var(--ink);background:#fff;font-family:inherit;font-size:15px;line-height:1.6;resize:vertical}
+  textarea:focus{outline:2px solid var(--accent);outline-offset:2px}
+  .memo{margin:0;padding:10px 12px;background:#FAFAF7;border:1px solid #EDEDE8;border-radius:9px;font-size:14px;white-space:pre-wrap;overflow-wrap:anywhere}
+  .memo-edit{display:flex;flex-direction:column;gap:8px}
+  .memo-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  .linkbtn{border:none;background:none;padding:0;min-height:32px;color:var(--accent);font-size:13px;font-weight:600;cursor:pointer;text-decoration:underline;align-self:flex-start}
+  .person-memo{display:flex;flex-direction:column;gap:8px;padding-bottom:14px;border-bottom:1px solid var(--line)}
+  .person-memo label{font-size:13px;font-weight:600;color:#3A3E45}
   .form{display:flex;flex-direction:column;gap:22px}
   .chips{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:8px}
   .chip{display:inline-flex;align-items:center;gap:2px;padding:0 4px 0 14px;height:36px;border-radius:18px;background:var(--accent-soft);color:var(--accent-ink);font-size:14px;font-weight:500}
@@ -169,6 +177,12 @@
           </div>
         </div>
 
+        <div class="field">
+          <label for="f-memo">メモ <span>（この回について・任意）</span></label>
+          <textarea id="f-memo" rows="4" placeholder="決まったこと、気づいたこと、次回までの宿題など"></textarea>
+          <p class="hint">あとから「会議一覧」で追記・修正できます。</p>
+        </div>
+
         <div class="field" style="gap:10px">
           <label for="f-part">参加者（自分以外）</label>
           <div class="row" style="gap:8px">
@@ -216,8 +230,9 @@ const SCOPE = 'https://www.googleapis.com/auth/drive.file';
 const SHEETS = 'https://sheets.googleapis.com/v4/spreadsheets';
 const DRIVE = 'https://www.googleapis.com/drive/v3/files';
 const LS_ID = 'meetingLog.spreadsheetId';
-const M_HEAD = ['ID', '会議名称', '実施日', '参加者', '会議記録URL', '登録日時', '削除'];
+const M_HEAD = ['ID', '会議名称', '実施日', '参加者', '会議記録URL', '登録日時', '削除', 'メモ'];
 const S_HEAD = ['会議名称', '概要URL'];
+const P_HEAD = ['名前', '人物メモ', '更新日時'];
 const WEEK = ['日', '月', '火', '水', '木', '金', '土'];
 
 /* ---------- 状態 ---------- */
@@ -231,7 +246,12 @@ const S = {
   nameActive: -1,
   autoOverview: '',
   selected: '',
-  busy: false
+  busy: false,
+  personMemos: {},   // name -> {memo, updatedAt}
+  editingMeeting: '',// メモ編集中の会議ID
+  meetingDrafts: {}, // id -> 編集中の文字列
+  personDrafts: {},  // name -> 編集中の文字列
+  note: {}           // 'm:<id>' / 'p:<name>' -> 保存結果の表示
 };
 
 /* ---------- ユーティリティ ---------- */
@@ -342,7 +362,8 @@ async function findOrCreateSheet() {
       properties: { title: CONFIG.SHEET_TITLE, locale: 'ja_JP', timeZone: 'Asia/Tokyo' },
       sheets: [
         { properties: { title: 'meetings', gridProperties: { frozenRowCount: 1 } } },
-        { properties: { title: 'series', gridProperties: { frozenRowCount: 1 } } }
+        { properties: { title: 'series', gridProperties: { frozenRowCount: 1 } } },
+        { properties: { title: 'people', gridProperties: { frozenRowCount: 1 } } }
       ]
     })
   });
@@ -351,18 +372,41 @@ async function findOrCreateSheet() {
     body: JSON.stringify({
       valueInputOption: 'RAW',
       data: [
-        { range: 'meetings!A1:G1', values: [M_HEAD] },
-        { range: 'series!A1:B1', values: [S_HEAD] }
+        { range: 'meetings!A1:H1', values: [M_HEAD] },
+        { range: 'series!A1:B1', values: [S_HEAD] },
+        { range: 'people!A1:C1', values: [P_HEAD] }
       ]
     })
   });
   return ss.spreadsheetId;
 }
 
+// 以前の版で作ったスプレッドシートに、メモ用の列とシートを追加する
+async function migrate() {
+  const meta = await api(`${SHEETS}/${S.ssId}?fields=sheets.properties.title`);
+  const titles = (meta.sheets || []).map((s) => s.properties.title);
+  if (!titles.includes('people')) {
+    await api(`${SHEETS}/${S.ssId}:batchUpdate`, {
+      method: 'POST',
+      body: JSON.stringify({ requests: [{ addSheet: { properties: { title: 'people', gridProperties: { frozenRowCount: 1 } } } }] })
+    });
+  }
+  const h = await api(`${SHEETS}/${S.ssId}/values:batchGet?ranges=${rng('meetings!H1')}&ranges=${rng('people!A1:C1')}`);
+  const data = [];
+  if (!(h.valueRanges[0].values && h.valueRanges[0].values[0] && h.valueRanges[0].values[0][0])) data.push({ range: 'meetings!H1', values: [['メモ']] });
+  if (!(h.valueRanges[1].values && h.valueRanges[1].values[0] && h.valueRanges[1].values[0][0])) data.push({ range: 'people!A1:C1', values: [P_HEAD] });
+  if (data.length) {
+    await api(`${SHEETS}/${S.ssId}/values:batchUpdate`, { method: 'POST', body: JSON.stringify({ valueInputOption: 'RAW', data }) });
+  }
+}
+
 async function loadAll() {
-  const r = await api(`${SHEETS}/${S.ssId}/values:batchGet?ranges=${rng('meetings!A2:G')}&ranges=${rng('series!A2:B')}`);
+  const r = await api(`${SHEETS}/${S.ssId}/values:batchGet?ranges=${rng('meetings!A2:H')}&ranges=${rng('series!A2:B')}&ranges=${rng('people!A2:C')}`);
   const mRows = (r.valueRanges[0] && r.valueRanges[0].values) || [];
   const sRows = (r.valueRanges[1] && r.valueRanges[1].values) || [];
+  const pRows = (r.valueRanges[2] && r.valueRanges[2].values) || [];
+  S.personMemos = {};
+  pRows.forEach((v) => { const n = (v[0] || '').trim(); if (n) S.personMemos[n] = { memo: v[1] || '', updatedAt: v[2] || '' }; });
   S.meetings = mRows.map((v, i) => ({
     row: i + 2,
     id: v[0] || '',
@@ -371,7 +415,8 @@ async function loadAll() {
     participants: splitNames(v[3] || ''),
     recordUrl: v[4] || '',
     createdAt: v[5] || '',
-    deleted: !!(v[6] && String(v[6]).trim())
+    deleted: !!(v[6] && String(v[6]).trim()),
+    memo: v[7] || ''
   })).filter((m) => m.id && m.name && !m.deleted);
   S.overviews = {};
   sRows.forEach((v) => { const n = (v[0] || '').trim(); if (n && v[1]) S.overviews[n] = v[1]; });
@@ -396,10 +441,34 @@ async function upsertOverview(name, url) {
 }
 
 async function appendMeeting(m) {
-  await api(`${SHEETS}/${S.ssId}/values/${rng('meetings!A:G')}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, {
+  await api(`${SHEETS}/${S.ssId}/values/${rng('meetings!A:H')}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, {
     method: 'POST',
-    body: JSON.stringify({ values: [[m.id, m.name, m.date, m.participants.join('、'), m.recordUrl, m.createdAt, '']] })
+    body: JSON.stringify({ values: [[m.id, m.name, m.date, m.participants.join('、'), m.recordUrl, m.createdAt, '', m.memo]] })
   });
+}
+
+async function updateMeetingMemo(id, memo) {
+  const r = await api(`${SHEETS}/${S.ssId}/values/${rng('meetings!A2:A')}`);
+  const idx = (r.values || []).findIndex((v) => v[0] === id);
+  if (idx < 0) throw new Error('この会議がスプレッドシートに見つかりません。再読み込みしてください。');
+  await api(`${SHEETS}/${S.ssId}/values/${rng('meetings!H' + (idx + 2))}?valueInputOption=RAW`, {
+    method: 'PUT', body: JSON.stringify({ values: [[memo]] })
+  });
+}
+
+async function upsertPersonMemo(name, memo) {
+  const now = new Date().toISOString();
+  const r = await api(`${SHEETS}/${S.ssId}/values/${rng('people!A2:A')}`);
+  const idx = (r.values || []).findIndex((v) => (v[0] || '').trim() === name);
+  if (idx >= 0) {
+    await api(`${SHEETS}/${S.ssId}/values/${rng('people!B' + (idx + 2) + ':C' + (idx + 2))}?valueInputOption=RAW`, {
+      method: 'PUT', body: JSON.stringify({ values: [[memo, now]] })
+    });
+  } else {
+    await api(`${SHEETS}/${S.ssId}/values/${rng('people!A:C')}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, {
+      method: 'POST', body: JSON.stringify({ values: [[name, memo, now]] })
+    });
+  }
 }
 
 async function markDeleted(id) {
@@ -520,6 +589,28 @@ function linksHtml(m) {
     '</div>';
 }
 
+function noteHtml(key) {
+  const n = S.note[key];
+  return n ? `<span class="msg ${n.kind}" role="status" style="font-size:13px">${esc(n.text)}</span>` : '';
+}
+
+function meetingMemoHtml(m) {
+  if (S.editingMeeting === m.id) {
+    const draft = S.meetingDrafts[m.id] ?? m.memo;
+    return `<div class="memo-edit">
+      <label for="mm-${esc(m.id)}" class="hint" style="font-weight:600;color:#3A3E45">この回のメモ</label>
+      <textarea id="mm-${esc(m.id)}" rows="5" data-mdraft="${esc(m.id)}">${esc(draft)}</textarea>
+      <div class="memo-actions">
+        <button type="button" class="btn primary" data-msave="${esc(m.id)}">メモを保存</button>
+        <button type="button" class="btn ghost" data-mcancel="${esc(m.id)}">キャンセル</button>
+        ${noteHtml('m:' + m.id)}
+      </div>
+    </div>`;
+  }
+  return (m.memo ? `<p class="memo">${esc(m.memo)}</p>` : '') +
+    `<div class="memo-actions"><button type="button" class="linkbtn" data-medit="${esc(m.id)}">${m.memo ? 'メモを編集' : 'メモを追加'}</button>${noteHtml('m:' + m.id)}</div>`;
+}
+
 function renderList() {
   const body = $('list-body');
   if (!S.meetings.length) {
@@ -537,6 +628,7 @@ function renderList() {
           ${m.participants.map((p) => `<button type="button" class="tag" data-person="${esc(p)}">${esc(p)}</button>`).join('')}
         </div>
         ${linksHtml(m)}
+        ${meetingMemoHtml(m)}
       </div>
       <button type="button" class="icon-btn" data-del="${esc(m.id)}" aria-label="「${esc(m.name)}」（${esc(dateLabel(m.date))}）を削除">${ICON_TRASH}</button>
     </li>`).join('') + '</ul>';
@@ -561,13 +653,22 @@ function renderPeople() {
         <h3 style="margin:0;font-size:20px">${esc(sel)} さん</h3>
         <span class="hint" style="font-size:13px">自分といっしょに ${rows.length} 回</span>
       </div>
+      <div class="person-memo">
+        <label for="pm-memo">人物メモ <span class="hint" style="font-weight:500">（会議に関係なく、この人について）</span></label>
+        <textarea id="pm-memo" rows="5" data-pdraft="${esc(sel)}" placeholder="役割・担当、話し方の傾向、関心ごと、気をつけたいことなど">${esc(S.personDrafts[sel] ?? (S.personMemos[sel] ? S.personMemos[sel].memo : ''))}</textarea>
+        <div class="memo-actions">
+          <button type="button" class="btn primary" data-psave="${esc(sel)}">人物メモを保存</button>
+          ${noteHtml('p:' + sel) || (S.personMemos[sel] && S.personMemos[sel].updatedAt ? `<span class="hint">最終更新 ${esc(new Date(S.personMemos[sel].updatedAt).toLocaleString('ja-JP', { year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }))}</span>` : '')}
+        </div>
+      </div>
       <div class="tbl-wrap"><table>
         <thead><tr><th scope="col" style="width:180px">実施日</th><th scope="col">会議名称</th><th scope="col" style="width:110px">リンク</th></tr></thead>
         <tbody>${rows.map((m) => {
           const o = safeUrl(S.overviews[m.name]); const r = safeUrl(m.recordUrl);
           const l = (o ? `<a href="${esc(o)}" target="_blank" rel="noopener noreferrer" style="margin-right:12px">概要</a>` : '') +
                     (r ? `<a href="${esc(r)}" target="_blank" rel="noopener noreferrer">記録</a>` : '');
-          return `<tr><td class="d">${esc(dateLabel(m.date))}</td><td style="font-weight:500">${esc(m.name)}</td><td>${l || '<span class="hint">—</span>'}</td></tr>`;
+          const memo = m.memo ? `<div class="hint" style="font-weight:400;white-space:pre-wrap;overflow-wrap:anywhere;margin-top:2px">${esc(m.memo)}</div>` : '';
+          return `<tr><td class="d">${esc(dateLabel(m.date))}</td><td><div style="font-weight:500">${esc(m.name)}</div>${memo}</td><td>${l || '<span class="hint">—</span>'}</td></tr>`;
         }).join('')}</tbody>
       </table></div>
     </div>
@@ -616,14 +717,14 @@ async function save() {
 
   const m = {
     id: 'm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-    name, date, participants: S.parts.slice(), recordUrl: rec,
+    name, date, participants: S.parts.slice(), recordUrl: rec, memo: $('f-memo').value.trim(),
     createdAt: new Date().toISOString()
   };
   S.busy = true; $('btn-save').disabled = true; setMsg('保存中…');
   try {
     await appendMeeting(m);
     if (ov || S.overviews[name]) await upsertOverview(name, ov);
-    $('f-name').value = ''; $('f-overview').value = ''; $('f-record').value = ''; $('f-part').value = '';
+    $('f-name').value = ''; $('f-overview').value = ''; $('f-record').value = ''; $('f-part').value = ''; $('f-memo').value = '';
     S.parts = []; S.autoOverview = '';
     await loadAll();
     setMsg('登録しました。', 'ok');
@@ -647,6 +748,37 @@ async function removeMeeting(id) {
   }
 }
 
+async function saveMeetingMemo(id, btn) {
+  const memo = (S.meetingDrafts[id] ?? '').trim();
+  btn.disabled = true;
+  S.note['m:' + id] = { kind: '', text: '保存中…' }; renderList();
+  try {
+    await updateMeetingMemo(id, memo);
+    delete S.meetingDrafts[id];
+    S.editingMeeting = '';
+    S.note['m:' + id] = { kind: 'ok', text: '保存しました。' };
+    await loadAll();
+  } catch (e) {
+    S.note['m:' + id] = { kind: 'err', text: '保存できませんでした：' + e.message };
+    renderList();
+  }
+}
+
+async function savePersonMemo(name, btn) {
+  const memo = (S.personDrafts[name] ?? (S.personMemos[name] ? S.personMemos[name].memo : '')).trim();
+  btn.disabled = true;
+  S.note['p:' + name] = { kind: '', text: '保存中…' }; renderPeople();
+  try {
+    await upsertPersonMemo(name, memo);
+    delete S.personDrafts[name];
+    S.note['p:' + name] = { kind: 'ok', text: '保存しました。' };
+    await loadAll();
+  } catch (e) {
+    S.note['p:' + name] = { kind: 'err', text: '保存できませんでした：' + e.message };
+    renderPeople();
+  }
+}
+
 async function reload() {
   setStatus('読み込み中…');
   try { await loadAll(); } catch (e) { setStatus('読み込めませんでした：' + e.message); }
@@ -658,6 +790,7 @@ async function login() {
   try {
     await requestToken('');
     S.ssId = await findOrCreateSheet();
+    await migrate();
     localStorage.setItem(LS_ID, S.ssId);
     $('sheet-link').href = 'https://docs.google.com/spreadsheets/d/' + S.ssId + '/edit';
     $('signin').hidden = true;
@@ -738,7 +871,27 @@ function bind() {
   $('f-overview').addEventListener('input', () => { S.autoOverview = ''; });
 
   // 一覧・参加者別（イベント委譲）
+  $('list-body').addEventListener('input', (e) => {
+    const t = e.target.closest('[data-mdraft]');
+    if (t) { S.meetingDrafts[t.dataset.mdraft] = t.value; delete S.note['m:' + t.dataset.mdraft]; }
+  });
+  $('people-body').addEventListener('input', (e) => {
+    const t = e.target.closest('[data-pdraft]');
+    if (t) { S.personDrafts[t.dataset.pdraft] = t.value; delete S.note['p:' + t.dataset.pdraft]; }
+  });
   $('list-body').addEventListener('click', (e) => {
+    const ed = e.target.closest('[data-medit]');
+    if (ed) {
+      const id = ed.dataset.medit;
+      S.editingMeeting = id; delete S.note['m:' + id];
+      renderList();
+      const ta = $('mm-' + id); if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
+      return;
+    }
+    const sv = e.target.closest('[data-msave]');
+    if (sv) { saveMeetingMemo(sv.dataset.msave, sv); return; }
+    const cc = e.target.closest('[data-mcancel]');
+    if (cc) { delete S.meetingDrafts[cc.dataset.mcancel]; delete S.note['m:' + cc.dataset.mcancel]; S.editingMeeting = ''; renderList(); return; }
     const del = e.target.closest('[data-del]');
     if (del) { removeMeeting(del.dataset.del); return; }
     const p = e.target.closest('[data-person]');
@@ -747,6 +900,8 @@ function bind() {
     if (g) setView(g.dataset.go);
   });
   $('people-body').addEventListener('click', (e) => {
+    const ps = e.target.closest('[data-psave]');
+    if (ps) { savePersonMemo(ps.dataset.psave, ps); return; }
     const b = e.target.closest('[data-select]');
     if (b) { S.selected = b.dataset.select; renderPeople(); }
   });
