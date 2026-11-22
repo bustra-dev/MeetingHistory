@@ -198,7 +198,7 @@
         </div>
 
         <div class="field" style="gap:10px">
-          <label for="f-part">参加者（自分以外）</label>
+          <label for="f-part">参加者（自分以外） <span>（任意）</span></label>
           <div class="row" style="gap:8px">
             <input id="f-part" type="text" autocomplete="off" placeholder="名前を入力して Enter（読点区切りで複数可）" style="flex:1 1 280px;width:auto">
             <button type="button" class="btn" id="btn-add">
@@ -206,7 +206,7 @@
             </button>
           </div>
           <ul class="chips" id="parts" aria-label="追加した参加者"></ul>
-          <p class="hint" id="parts-empty">まだ参加者がいません。</p>
+          <p class="hint" id="parts-empty">まだ参加者がいません。主催者も参加者も空のまま登録すると、主催者は「自分」になります。</p>
           <div class="suggest" id="suggest" hidden></div>
         </div>
 
@@ -771,11 +771,12 @@ async function save() {
   const rec = $('f-record').value.trim();
   const pending = $('f-part').value.trim();
   if (pending) addParts(pending);
-  const organizer = $('f-org').value.trim();
+  let organizer = $('f-org').value.trim();
   if (organizer && organizer !== '自分' && !S.parts.includes(organizer)) { S.parts.push(organizer); renderParts(); }
+  // 主催者も参加者もいない＝自分ひとりで主催した会議として扱う
+  if (!organizer && !S.parts.length) organizer = '自分';
   if (!name) return setMsg('会議名称を入力してください。', 'err');
   if (!date) return setMsg('実施日を選んでください。', 'err');
-  if (!S.parts.length) return setMsg('参加者を1人以上追加してください。', 'err');
   if (ov && !safeUrl(ov)) return setMsg('概要URLは http:// または https:// で始まるURLを入力してください。', 'err');
   if (rec && !safeUrl(rec)) return setMsg('会議記録URLは http:// または https:// で始まるURLを入力してください。', 'err');
 
