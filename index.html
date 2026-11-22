@@ -522,9 +522,15 @@ function nameIndex() {
   });
   return Object.values(map).sort((a, b) => b.last.localeCompare(a.last));
 }
+// 自分以外の出席者（主催者も参加者の一人として含める）
+function attendees(m) {
+  const list = m.participants.slice();
+  if (m.organizer && m.organizer !== '自分' && !list.includes(m.organizer)) list.unshift(m.organizer);
+  return list;
+}
 function personCounts() {
   const c = {};
-  S.meetings.forEach((m) => m.participants.forEach((p) => { c[p] = (c[p] || 0) + 1; }));
+  S.meetings.forEach((m) => attendees(m).forEach((p) => { c[p] = (c[p] || 0) + 1; }));
   return c;
 }
 function sortedPeople(c) {
@@ -710,7 +716,7 @@ function renderPeople() {
     return;
   }
   const sel = c[S.selected] ? S.selected : names[0];
-  const rows = S.meetings.filter((m) => m.participants.includes(sel)).sort(byDateDesc);
+  const rows = S.meetings.filter((m) => attendees(m).includes(sel)).sort(byDateDesc);
   body.innerHTML = `<div class="split">
     <ul class="plist" aria-label="参加者">${names.map((n) =>
       `<li><button type="button" data-select="${esc(n)}" ${n === sel ? 'aria-current="true"' : ''}><span>${esc(n)}</span><span>${c[n]}件</span></button></li>`).join('')}
