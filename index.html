@@ -82,6 +82,9 @@
   .people .cnt{font-size:12px;color:var(--sub);margin-right:2px}
   .tag{display:inline-flex;align-items:center;height:28px;padding:0 10px;border-radius:14px;background:#EFEFEA;color:#2B2F36;font-size:13px;border:none;cursor:pointer}
   .tag.me{background:var(--ink);color:#fff;cursor:default}
+  .tag.org{background:var(--ink);color:#fff;font-weight:600}
+  .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+  .tag.org .role{display:inline-flex;align-items:center;height:20px;padding:0 7px;border-radius:10px;background:#FFFFFF;color:var(--ink);font-size:11px;font-weight:700}
   .links{display:flex;flex-wrap:wrap;gap:8px}
   .links a{display:inline-flex;align-items:center;gap:6px;min-height:32px;padding:0 12px;border:1px solid #D5DCF3;border-radius:8px;background:#F4F6FD;font-size:13px;font-weight:600;text-decoration:none}
   .icon-btn{flex:0 0 auto;width:44px;height:44px;border:1px solid var(--line);border-radius:10px;background:#fff;color:#6A6F77;cursor:pointer;display:inline-flex;align-items:center;justify-content:center}
@@ -191,10 +194,10 @@
         </div>
 
         <div class="field" style="gap:10px">
-          <label for="f-org">主催者 <span>（任意）</span></label>
+          <label for="f-org">主催者 <span>（必須）</span></label>
           <input id="f-org" type="text" autocomplete="off" placeholder="例：自分、田中" style="max-width:420px">
           <div class="suggest" id="org-suggest"></div>
-          <p class="hint">自分以外を主催者にすると、その人は参加者にも自動で追加されます。</p>
+          <p class="hint">主催者も参加者も空のまま登録すると、主催者は「自分」になります。自分以外を主催者にすると、その人は参加者にも自動で追加されます。</p>
         </div>
 
         <div class="field" style="gap:10px">
@@ -660,6 +663,20 @@ function meetingMemoHtml(m) {
     `<div class="memo-actions"><button type="button" class="linkbtn" data-medit="${esc(m.id)}">${m.memo ? 'メモを編集' : 'メモを追加'}</button>${noteHtml('m:' + m.id)}</div>`;
 }
 
+// 主催者（参加者の一人で、属性が「主催」）を強調したタグ
+function organizerTag(m) {
+  const o = m.organizer;
+  if (!o) return '';
+  const inner = `<span class="sr">主催：</span>${esc(o)}`;
+  return o === '自分'
+    ? `<span class="tag org" style="cursor:default">${inner}</span>`
+    : `<button type="button" class="tag org" data-person="${esc(o)}">${inner}</button>`;
+}
+// 参加人数＝主催者＋主催でない参加者（自分以外）
+function attendeeCount(m) {
+  return (m.organizer ? 1 : 0) + m.participants.filter((p) => p !== m.organizer).length;
+}
+
 function renderList() {
   const body = $('list-body');
   if (!S.meetings.length) {
@@ -671,11 +688,11 @@ function renderList() {
       <div class="when"><span>実施日</span><span>${esc(dateLabel(m.date))}</span></div>
       <div class="body">
         <h3>${esc(m.name)}</h3>
-        ${(m.organizer || S.creators[m.name]) ? `<div class="hint" style="font-size:13px;display:flex;flex-wrap:wrap;gap:4px 16px">${m.organizer ? `<span>主催：<strong style="color:var(--ink)">${esc(m.organizer)}</strong></span>` : ''}${S.creators[m.name] ? `<span>作成者：<strong style="color:var(--ink)">${esc(S.creators[m.name])}</strong></span>` : ''}</div>` : ''}
+        ${S.creators[m.name] ? `<div class="hint" style="font-size:13px">作成者：<strong style="color:var(--ink)">${esc(S.creators[m.name])}</strong></div>` : ''}
         <div class="people">
-          <span class="cnt">参加者 ${m.participants.length + 1}人</span>
-          <span class="tag me">自分</span>
-          ${m.participants.map((p) => `<button type="button" class="tag" data-person="${esc(p)}">${esc(p)}</button>`).join('')}
+          <span class="cnt">参加者 ${attendeeCount(m)}人</span>
+          ${organizerTag(m)}
+          ${m.participants.filter((p) => p !== m.organizer).map((p) => `<button type="button" class="tag" data-person="${esc(p)}">${esc(p)}</button>`).join('')}
         </div>
         ${linksHtml(m)}
         ${meetingMemoHtml(m)}
@@ -777,6 +794,7 @@ async function save() {
   if (!organizer && !S.parts.length) organizer = '自分';
   if (!name) return setMsg('会議名称を入力してください。', 'err');
   if (!date) return setMsg('実施日を選んでください。', 'err');
+  if (!organizer) return setMsg('主催者を入力してください。', 'err');
   if (ov && !safeUrl(ov)) return setMsg('概要URLは http:// または https:// で始まるURLを入力してください。', 'err');
   if (rec && !safeUrl(rec)) return setMsg('会議記録URLは http:// または https:// で始まるURLを入力してください。', 'err');
 
