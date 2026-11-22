@@ -164,6 +164,13 @@
           </div>
         </div>
 
+        <div class="field" style="gap:10px">
+          <label for="f-creator">作成者 <span>（会議名称ごとに共通・任意）</span></label>
+          <input id="f-creator" type="text" autocomplete="off" placeholder="例：自分、田中" style="max-width:420px">
+          <div class="suggest" id="creator-suggest"></div>
+          <p class="hint" id="cr-hint">同じ会議名称の回では、次から自動で入ります。</p>
+        </div>
+
         <div class="row">
           <div class="field" style="flex:1 1 320px">
             <label for="f-overview">概要URL <span>（会議名称ごとに共通・任意）</span></label>
@@ -181,6 +188,13 @@
           <label for="f-memo">メモ <span>（この回について・任意）</span></label>
           <textarea id="f-memo" rows="4" placeholder="決まったこと、気づいたこと、次回までの宿題など"></textarea>
           <p class="hint">あとから「会議一覧」で追記・修正できます。</p>
+        </div>
+
+        <div class="field" style="gap:10px">
+          <label for="f-org">主催者 <span>（任意）</span></label>
+          <input id="f-org" type="text" autocomplete="off" placeholder="例：自分、田中" style="max-width:420px">
+          <div class="suggest" id="org-suggest"></div>
+          <p class="hint">自分以外を主催者にすると、その人は参加者にも自動で追加されます。</p>
         </div>
 
         <div class="field" style="gap:10px">
@@ -230,8 +244,8 @@ const SCOPE = 'https://www.googleapis.com/auth/drive.file';
 const SHEETS = 'https://sheets.googleapis.com/v4/spreadsheets';
 const DRIVE = 'https://www.googleapis.com/drive/v3/files';
 const LS_ID = 'meetingLog.spreadsheetId';
-const M_HEAD = ['ID', '会議名称', '実施日', '参加者', '会議記録URL', '登録日時', '削除', 'メモ'];
-const S_HEAD = ['会議名称', '概要URL'];
+const M_HEAD = ['ID', '会議名称', '実施日', '参加者', '会議記録URL', '登録日時', '削除', 'メモ', '主催者'];
+const S_HEAD = ['会議名称', '概要URL', '作成者'];
 const P_HEAD = ['名前', '人物メモ', '更新日時'];
 const WEEK = ['日', '月', '火', '水', '木', '金', '土'];
 
@@ -245,6 +259,9 @@ const S = {
   parts: [],
   nameActive: -1,
   autoOverview: '',
+  creators: {},      // 会議名称 -> 作成者
+  autoCreator: '',
+  autoOrg: '',
   selected: '',
   busy: false,
   personMemos: {},   // name -> {memo, updatedAt}
@@ -372,8 +389,8 @@ async function findOrCreateSheet() {
     body: JSON.stringify({
       valueInputOption: 'RAW',
       data: [
-        { range: 'meetings!A1:H1', values: [M_HEAD] },
-        { range: 'series!A1:B1', values: [S_HEAD] },
+        { range: 'meetings!A1:I1', values: [M_HEAD] },
+        { range: 'series!A1:C1', values: [S_HEAD] },
         { range: 'people!A1:C1', values: [P_HEAD] }
       ]
     })
@@ -391,9 +408,11 @@ async function migrate() {
       body: JSON.stringify({ requests: [{ addSheet: { properties: { title: 'people', gridProperties: { frozenRowCount: 1 } } } }] })
     });
   }
-  const h = await api(`${SHEETS}/${S.ssId}/values:batchGet?ranges=${rng('meetings!H1')}&ranges=${rng('people!A1:C1')}`);
+  const h = await api(`${SHEETS}/${S.ssId}/values:batchGet?ranges=${rng('meetings!H1')}&ranges=${rng('people!A1:C1')}&ranges=${rng('meetings!I1')}&ranges=${rng('series!C1')}`);
   const data = [];
+  if (!(h.valueRanges[3].values && h.valueRanges[3].values[0] && h.valueRanges[3].values[0][0])) data.push({ range: 'series!C1', values: [['作成者']] });
   if (!(h.valueRanges[0].values && h.valueRanges[0].values[0] && h.valueRanges[0].values[0][0])) data.push({ range: 'meetings!H1', values: [['メモ']] });
+  if (!(h.valueRanges[2].values && h.valueRanges[2].values[0] && h.valueRanges[2].values[0][0])) data.push({ range: 'meetings!I1', values: [['主催者']] });
   if (!(h.valueRanges[1].values && h.valueRanges[1].values[0] && h.valueRanges[1].values[0][0])) data.push({ range: 'people!A1:C1', values: [P_HEAD] });
   if (data.length) {
     await api(`${SHEETS}/${S.ssId}/values:batchUpdate`, { method: 'POST', body: JSON.stringify({ valueInputOption: 'RAW', data }) });
@@ -401,7 +420,7 @@ async function migrate() {
 }
 
 async function loadAll() {
-  const r = await api(`${SHEETS}/${S.ssId}/values:batchGet?ranges=${rng('meetings!A2:H')}&ranges=${rng('series!A2:B')}&ranges=${rng('people!A2:C')}`);
+  const r = await api(`${SHEETS}/${S.ssId}/values:batchGet?ranges=${rng('meetings!A2:I')}&ranges=${rng('series!A2:C')}&ranges=${rng('people!A2:C')}`);
   const mRows = (r.valueRanges[0] && r.valueRanges[0].values) || [];
   const sRows = (r.valueRanges[1] && r.valueRanges[1].values) || [];
   const pRows = (r.valueRanges[2] && r.valueRanges[2].values) || [];
@@ -416,34 +435,41 @@ async function loadAll() {
     recordUrl: v[4] || '',
     createdAt: v[5] || '',
     deleted: !!(v[6] && String(v[6]).trim()),
-    memo: v[7] || ''
+    memo: v[7] || '',
+    organizer: (v[8] || '').trim()
   })).filter((m) => m.id && m.name && !m.deleted);
   S.overviews = {};
-  sRows.forEach((v) => { const n = (v[0] || '').trim(); if (n && v[1]) S.overviews[n] = v[1]; });
+  S.creators = {};
+  sRows.forEach((v) => {
+    const n = (v[0] || '').trim(); if (!n) return;
+    if (v[1]) S.overviews[n] = v[1];
+    if (v[2] && String(v[2]).trim()) S.creators[n] = String(v[2]).trim();
+  });
   setStatus('最新の状態です（' + new Date().toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }) + ' 読み込み）');
   renderAll();
 }
 
-async function upsertOverview(name, url) {
-  const r = await api(`${SHEETS}/${S.ssId}/values/${rng('series!A2:B')}`);
+// 会議名称ごとの情報（概要URL・作成者）を保存する
+async function upsertSeries(name, url, creator) {
+  const r = await api(`${SHEETS}/${S.ssId}/values/${rng('series!A2:C')}`);
   const rows = r.values || [];
   const idx = rows.findIndex((v) => (v[0] || '').trim() === name);
   if (idx >= 0) {
-    if ((rows[idx][1] || '') === url) return;
-    await api(`${SHEETS}/${S.ssId}/values/${rng('series!B' + (idx + 2))}?valueInputOption=RAW`, {
-      method: 'PUT', body: JSON.stringify({ values: [[url]] })
+    if ((rows[idx][1] || '') === url && (rows[idx][2] || '').trim() === creator) return;
+    await api(`${SHEETS}/${S.ssId}/values/${rng('series!B' + (idx + 2) + ':C' + (idx + 2))}?valueInputOption=RAW`, {
+      method: 'PUT', body: JSON.stringify({ values: [[url, creator]] })
     });
-  } else if (url) {
-    await api(`${SHEETS}/${S.ssId}/values/${rng('series!A:B')}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, {
-      method: 'POST', body: JSON.stringify({ values: [[name, url]] })
+  } else if (url || creator) {
+    await api(`${SHEETS}/${S.ssId}/values/${rng('series!A:C')}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, {
+      method: 'POST', body: JSON.stringify({ values: [[name, url, creator]] })
     });
   }
 }
 
 async function appendMeeting(m) {
-  await api(`${SHEETS}/${S.ssId}/values/${rng('meetings!A:H')}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, {
+  await api(`${SHEETS}/${S.ssId}/values/${rng('meetings!A:I')}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, {
     method: 'POST',
-    body: JSON.stringify({ values: [[m.id, m.name, m.date, m.participants.join('、'), m.recordUrl, m.createdAt, '', m.memo]] })
+    body: JSON.stringify({ values: [[m.id, m.name, m.date, m.participants.join('、'), m.recordUrl, m.createdAt, '', m.memo, m.organizer]] })
   });
 }
 
@@ -537,13 +563,36 @@ function renderParts() {
   box.hidden = names.length === 0;
   box.innerHTML = names.length ? '<span class="hint">これまでの参加者から追加：</span>' +
     names.map((n) => `<button type="button" data-add="${esc(n)}">＋ ${esc(n)}</button>`).join('') : '';
+  renderOrgSuggest();
+}
+
+function renderOrgSuggest() {
+  const cur = $('f-org').value.trim();
+  const past = [];
+  S.meetings.slice().sort(byDateDesc).forEach((m) => { if (m.organizer && !past.includes(m.organizer)) past.push(m.organizer); });
+  const cands = [];
+  ['自分'].concat(S.parts, past).forEach((n) => { if (n && n !== cur && !cands.includes(n)) cands.push(n); });
+  const list = cands.slice(0, 12);
+  $('org-suggest').innerHTML = list.map((n) => `<button type="button" data-org="${esc(n)}">${esc(n)}</button>`).join('');
 }
 
 function renderOverviewHint() {
-  const known = !!S.overviews[$('f-name').value.trim()];
-  $('ov-hint').textContent = known
+  const n = $('f-name').value.trim();
+  $('ov-hint').textContent = S.overviews[n]
     ? 'この会議名称で登録済みの概要URLです。変更すると同じ名称の全回に反映されます。'
     : '同じ会議名称の回では、次から自動で入ります。';
+  $('cr-hint').textContent = S.creators[n]
+    ? 'この会議名称で登録済みの作成者です。変更すると同じ名称の全回に反映されます。'
+    : '同じ会議名称の回では、次から自動で入ります。';
+  renderCreatorSuggest();
+}
+
+function renderCreatorSuggest() {
+  const cur = $('f-creator').value.trim();
+  const cands = [];
+  ['自分'].concat(Object.values(S.creators), sortedPeople(personCounts()))
+    .forEach((n) => { if (n && n !== cur && !cands.includes(n)) cands.push(n); });
+  $('creator-suggest').innerHTML = cands.slice(0, 12).map((n) => `<button type="button" data-creator="${esc(n)}">${esc(n)}</button>`).join('');
 }
 
 function filteredNames() {
@@ -622,6 +671,7 @@ function renderList() {
       <div class="when"><span>実施日</span><span>${esc(dateLabel(m.date))}</span></div>
       <div class="body">
         <h3>${esc(m.name)}</h3>
+        ${(m.organizer || S.creators[m.name]) ? `<div class="hint" style="font-size:13px;display:flex;flex-wrap:wrap;gap:4px 16px">${m.organizer ? `<span>主催：<strong style="color:var(--ink)">${esc(m.organizer)}</strong></span>` : ''}${S.creators[m.name] ? `<span>作成者：<strong style="color:var(--ink)">${esc(S.creators[m.name])}</strong></span>` : ''}</div>` : ''}
         <div class="people">
           <span class="cnt">参加者 ${m.participants.length + 1}人</span>
           <span class="tag me">自分</span>
@@ -668,7 +718,9 @@ function renderPeople() {
           const l = (o ? `<a href="${esc(o)}" target="_blank" rel="noopener noreferrer" style="margin-right:12px">概要</a>` : '') +
                     (r ? `<a href="${esc(r)}" target="_blank" rel="noopener noreferrer">記録</a>` : '');
           const memo = m.memo ? `<div class="hint" style="font-weight:400;white-space:pre-wrap;overflow-wrap:anywhere;margin-top:2px">${esc(m.memo)}</div>` : '';
-          return `<tr><td class="d">${esc(dateLabel(m.date))}</td><td><div style="font-weight:500">${esc(m.name)}</div>${memo}</td><td>${l || '<span class="hint">—</span>'}</td></tr>`;
+          const roles = [m.organizer ? '主催：' + m.organizer : '', S.creators[m.name] ? '作成者：' + S.creators[m.name] : ''].filter(Boolean).join('　');
+          const org = roles ? `<div class="hint" style="font-size:12px">${esc(roles)}</div>` : '';
+          return `<tr><td class="d">${esc(dateLabel(m.date))}</td><td><div style="font-weight:500">${esc(m.name)}</div>${org}${memo}</td><td>${l || '<span class="hint">—</span>'}</td></tr>`;
         }).join('')}</tbody>
       </table></div>
     </div>
@@ -691,6 +743,16 @@ function onNameChanged() {
   const known = S.overviews[v];
   if (known) { ov.value = known; S.autoOverview = known; }
   else if (S.autoOverview && ov.value === S.autoOverview) { ov.value = ''; S.autoOverview = ''; }
+  const cr = $('f-creator');
+  const knownCr = S.creators[v];
+  if (knownCr) { cr.value = knownCr; S.autoCreator = knownCr; }
+  else if (S.autoCreator && cr.value === S.autoCreator) { cr.value = ''; S.autoCreator = ''; }
+  // 主催者：同じ会議名称の直近の回と同じ人を仮に入れる（手で入力済みなら触らない）
+  const org = $('f-org');
+  const prev = S.meetings.filter((m) => m.name === v && m.organizer).sort(byDateDesc)[0];
+  if (prev && (!org.value.trim() || org.value === S.autoOrg)) { org.value = prev.organizer; S.autoOrg = prev.organizer; }
+  else if (!prev && S.autoOrg && org.value === S.autoOrg) { org.value = ''; S.autoOrg = ''; }
+  renderOrgSuggest();
   renderOverviewHint();
 }
 
@@ -709,6 +771,8 @@ async function save() {
   const rec = $('f-record').value.trim();
   const pending = $('f-part').value.trim();
   if (pending) addParts(pending);
+  const organizer = $('f-org').value.trim();
+  if (organizer && organizer !== '自分' && !S.parts.includes(organizer)) { S.parts.push(organizer); renderParts(); }
   if (!name) return setMsg('会議名称を入力してください。', 'err');
   if (!date) return setMsg('実施日を選んでください。', 'err');
   if (!S.parts.length) return setMsg('参加者を1人以上追加してください。', 'err');
@@ -717,15 +781,16 @@ async function save() {
 
   const m = {
     id: 'm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-    name, date, participants: S.parts.slice(), recordUrl: rec, memo: $('f-memo').value.trim(),
+    name, date, participants: S.parts.slice(), recordUrl: rec, memo: $('f-memo').value.trim(), organizer,
     createdAt: new Date().toISOString()
   };
   S.busy = true; $('btn-save').disabled = true; setMsg('保存中…');
   try {
     await appendMeeting(m);
-    if (ov || S.overviews[name]) await upsertOverview(name, ov);
-    $('f-name').value = ''; $('f-overview').value = ''; $('f-record').value = ''; $('f-part').value = ''; $('f-memo').value = '';
-    S.parts = []; S.autoOverview = '';
+    const creator = $('f-creator').value.trim();
+    if (ov || creator || S.overviews[name] || S.creators[name]) await upsertSeries(name, ov, creator);
+    $('f-name').value = ''; $('f-overview').value = ''; $('f-record').value = ''; $('f-part').value = ''; $('f-memo').value = ''; $('f-org').value = ''; S.autoOrg = '';
+    S.parts = []; S.autoOverview = ''; $('f-creator').value = ''; S.autoCreator = '';
     await loadAll();
     setMsg('登録しました。', 'ok');
   } catch (e) {
@@ -869,6 +934,16 @@ function bind() {
     }
   });
   $('f-overview').addEventListener('input', () => { S.autoOverview = ''; });
+  $('f-org').addEventListener('input', () => { S.autoOrg = ''; renderOrgSuggest(); });
+  $('f-creator').addEventListener('input', () => { S.autoCreator = ''; renderCreatorSuggest(); });
+  $('creator-suggest').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-creator]'); if (!b) return;
+    $('f-creator').value = b.dataset.creator; S.autoCreator = ''; renderCreatorSuggest();
+  });
+  $('org-suggest').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-org]'); if (!b) return;
+    $('f-org').value = b.dataset.org; S.autoOrg = ''; renderOrgSuggest();
+  });
 
   // 一覧・参加者別（イベント委譲）
   $('list-body').addEventListener('input', (e) => {
